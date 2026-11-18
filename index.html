@@ -626,40 +626,55 @@ function saveHFToken() {
   setGenStatus('✅ บันทึก Token แล้ว — กด Auto Gen อีกครั้ง', '#3daa6e');
 }
 
-async function genSingleImg(prompt, isLocal, attempt = 0) {
+// Pollinations ฟรีจำกัด 1 รูป / 45 วิ / IP — ถ้าโดน limit จะตอบ 402/429/503 เป็น JSON
+// ต้องเช็ก status เอง ไม่งั้นจะได้รูป "Free limit reached" มาเป็น BG
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function waitWithStatus(sec, label) {
+  for (let s = sec; s > 0; s--) {
+    setGenStatus(`⏳ ${label} — รอคิว Pollinations อีก ${s}s (ฟรีได้ 1 รูป/45 วิ)`, '#e85d04');
+    await sleep(1000);
+  }
+}
+
+async function fetchPollinations(prompt, model, label) {
   const seed = Math.floor(Math.random() * 999983);
-  // attempt 0: flux-realism, attempt 1+: flux (เร็วกว่า เสถียรกว่า)
-  const model = attempt === 0 ? 'flux-realism' : 'flux';
+  const polUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
+    `?width=832&height=1216&nologo=true&seed=${seed}&model=${model}&enhance=false`;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let r;
+    try { r = await fetch(polUrl); }
+    catch (e) { if (attempt < 3) { await waitWithStatus(5, label); continue; } throw new Error('Pollinations ไม่ตอบสนอง'); }
+    const ct = r.headers.get('content-type') || '';
+    if (r.ok && ct.startsWith('image/')) {
+      const blob = await r.blob();
+      return await new Promise(res => { const fr = new FileReader(); fr.onload = e => res(e.target.result); fr.readAsDataURL(blob); });
+    }
+    // อ่านเวลารอจาก Retry-After หรือข้อความ "Retry after Ns"
+    let msg = '', wait = Number(r.headers.get('retry-after')) || 0;
+    try { msg = (await r.json())?.error?.message || ''; } catch (e) {}
+    const m = msg.match(/Retry after (\d+)s/i);
+    if (m) wait = Math.max(wait, Number(m[1]));
+    if ([402, 429, 503].includes(r.status) && attempt < 3) {
+      await waitWithStatus(Math.min((wait || 15) + 2, 60), label);
+      continue;
+    }
+    throw new Error(msg || `Pollinations ${r.status}`);
+  }
+  throw new Error('Pollinations ไม่ว่าง ลองใหม่อีกครั้ง');
+}
+
+async function genSingleImg(prompt, isLocal, label = '') {
   let imgSrc;
-  try {
-    if (isLocal) {
-      const r = await fetch('/gen-bg-image', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt })
-      });
-      if (!r.ok) { const t = await r.text(); throw new Error(`${r.status}: ${t.slice(0,80)}`); }
-      imgSrc = (await r.json()).image;
-    } else {
-      const polUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
-        `?width=832&height=1216&nologo=true&seed=${seed}&model=${model}&enhance=false`;
-      await new Promise((res, rej) => {
-        const pi = new Image(); pi.onload = res;
-        pi.onerror = () => rej(new Error('Pollinations ไม่ตอบสนอง'));
-        pi.src = polUrl;
-      });
-      try {
-        const resp = await fetch('https://images.weserv.nl/?url=' + encodeURIComponent(polUrl));
-        if (!resp.ok) throw new Error(`weserv ${resp.status}`);
-        const blob = await resp.blob();
-        imgSrc = await new Promise(r => { const fr = new FileReader(); fr.onload = e => r(e.target.result); fr.readAsDataURL(blob); });
-      } catch(e) { imgSrc = polUrl; }
-    }
-  } catch(e) {
-    if (attempt < 2) {
-      await new Promise(r => setTimeout(r, 5000));
-      return genSingleImg(prompt, isLocal, attempt + 1);
-    }
-    throw e;
+  if (isLocal) {
+    const r = await fetch('/gen-bg-image', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt })
+    });
+    if (!r.ok) { const t = await r.text(); throw new Error(`${r.status}: ${t.slice(0,80)}`); }
+    imgSrc = (await r.json()).image;
+  } else {
+    imgSrc = await fetchPollinations(prompt, 'flux', label);
   }
   return new Promise((res, rej) => {
     const img = new Image();
@@ -742,23 +757,25 @@ async function genOneBG() {
     if (slot) { slot.innerHTML = `<div class="spin"><span>❌</span></div><div class="bg-opt-label">${label}</div>`; slot.classList.add('failed'); }
   };
 
-  // Sequential + หน่วง 2s ระหว่างสองรูปเพื่อป้องกัน rate-limit
+  // Sequential — รูปที่ 2 จะรอคิว Pollinations เองถ้าโดน limit
+  let lastErr = '';
   try {
     setGenStatus('กำลังสร้างรูปที่ 1…', '#e85d04');
-    fillSlot(0, idx1, await genSingleImg(buildPrompt(idx1), isLocal));
+    fillSlot(0, idx1, await genSingleImg(buildPrompt(idx1), isLocal, 'รูปที่ 1'));
     setGenStatus('รูป 1 สำเร็จ — กำลังสร้างรูปที่ 2…', '#e85d04');
   } catch(e) {
+    lastErr = e.message;
     failSlot(0, idx1);
     setGenStatus('รูป 1 ไม่สำเร็จ — กำลังสร้างรูปที่ 2…', '#888');
   }
   await new Promise(r => setTimeout(r, 2000));
   try {
-    fillSlot(1, idx2, await genSingleImg(buildPrompt(idx2), isLocal));
-  } catch(e) { failSlot(1, idx2); }
+    fillSlot(1, idx2, await genSingleImg(buildPrompt(idx2), isLocal, 'รูปที่ 2'));
+  } catch(e) { lastErr = e.message; failSlot(1, idx2); }
 
   clearInterval(timer);
   btn.disabled = false; btn.innerHTML = '🔄 สร้างใหม่';
-  setGenStatus(firstApplied ? `✅ เลือกรูปได้เลย — ${elapsed}s` : '❌ สร้างรูปไม่สำเร็จ',
+  setGenStatus(firstApplied ? `✅ เลือกรูปได้เลย — ${elapsed}s` : `❌ สร้างรูปไม่สำเร็จ${lastErr ? ' — ' + lastErr : ''}`,
                firstApplied ? '#3daa6e' : '#e94560');
 }
 
