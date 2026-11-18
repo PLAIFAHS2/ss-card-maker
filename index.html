@@ -264,7 +264,7 @@ html, body { height: 100%; overflow: hidden; font-family: 'Segoe UI', sans-serif
       <div class="section-label">✍ ข้อความบน Card</div>
       <textarea id="textInput"
         placeholder="TH-AI Passport&#10;1,621 ล้าน&#10;&#10;แบบไม่มีรายละเอียด เรื่อง AI&#10;แต่ดันไปละเอียดเรื่องจอโฆษณา?"
-        oninput="render()"></textarea>
+        oninput="render(); onCardTextInput()"></textarea>
       <button onclick="formatText()" id="fmtBtn"
         style="width:100%;background:linear-gradient(135deg,#1a2a1a,#2a4a2a);
                border:1.5px solid #3daa6e;color:#7dda9e;border-radius:8px;
@@ -274,6 +274,7 @@ html, body { height: 100%; overflow: hidden; font-family: 'Segoe UI', sans-serif
         ✨ จัดรูปแบบข้อความให้สวย
       </button>
       <div id="fmtStatus" style="font-size:10px;color:#555;text-align:center;min-height:14px"></div>
+      <div id="sceneHint" style="font-size:10px;color:#777;line-height:1.4;min-height:14px;margin-top:2px"></div>
       <div class="hint-box">
         <b>บรรทัดใหญ่</b> → พิมพ์ปกติ<br>
         เว้น <code>1 บรรทัดว่าง</code> → <b>บรรทัดเล็ก</b><br>
@@ -496,7 +497,8 @@ async function openGemini() {
 
   const W = L.template ? L.template.naturalWidth  : 1080;
   const H = L.template ? L.template.naturalHeight : 1350;
-  const sceneStyle = text ? s.prompt(text) : s.prompt('');
+  const gScene = text ? (sceneCache.get(text) || keywordScene(text)) : '';
+  const sceneStyle = gScene ? `${gScene}, ${s.setting}` : s.prompt('');
 
   const prompt = `Create a ${W}x${H} portrait background image for a social media card.
 ${sceneStyle}, ${GOV_STYLE}
@@ -527,10 +529,140 @@ Rules: NO people, NO faces, NO logos`;
   btn.innerHTML = '<img src="https://www.gstatic.com/lamda/images/gemini_sparkle_v002_d4735304ff6292a690345.svg" style="width:14px;height:14px;filter:brightness(2)" onerror="this.style.display=\'none\'"> Gemini';
 }
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 let pendingBGImg = null;
 let genStyleIdx  = 0;
 let lastGenText  = '';
 let defaultStyleRot = 0; // วน default style ไม่ให้ซ้ำ
+
+
+// ══════════════════════════════════════════
+//  ฉากจากข้อความ — แปลงข้อความไทยเป็น "สิ่งของ/ฉาก" ภาษาอังกฤษ
+//  1) Pollinations text (ฟรี ไม่ต้องใช้ key, ~20s, 1 ครั้ง/45s) — ยิงตอนหยุดพิมพ์
+//  2) ถ้าไม่ทัน/ไม่ว่าง → ใช้ตารางคำค้นไทย→อังกฤษ (ทันที)
+// ══════════════════════════════════════════
+const SCENE_KEYWORDS = [
+  [/\bai\b|เอไอ|ปัญญาประดิษฐ์|แชทบอท|chatgpt|โมเดลภาษา/i, 'glowing AI computer chip and server racks with blue light'],
+  [/จอ|โฆษณา|ป้าย|บิลบอร์ด|led/i, 'large digital LED advertising billboard screens'],
+  [/พาสปอร์ต|passport|หนังสือเดินทาง/i, 'Thai passport booklet and travel documents'],
+  [/งบ|ล้าน|พันล้าน|บาท|จัดสรร|ใช้เงิน|ค่าใช้จ่าย/i, 'stacks of Thai baht banknotes beside a thick budget report'],
+  [/ภาษี|สรรพากร/i, 'tax forms with a calculator and receipts'],
+  [/หุ้น|ตลาดหลักทรัพย์|ลงทุน|กองทุน/i, 'stock market chart screens with green and red candles'],
+  [/ทุจริต|โกง|คอร์รัปชัน|สินบน|เงินทอน|ฮั้ว/i, 'brown envelope stuffed with cash slipped under a document'],
+  [/ตรวจสอบ|สอบสวน|พิรุธ|สตง|ปปช|ป\.ป\.ช/i, 'magnifying glass over official documents with red marks'],
+  [/เลือกตั้ง|โหวต|ลงคะแนน|กกต/i, 'clear ballot box with folded ballots'],
+  [/ศาล|กฎหมาย|พ\.ร\.บ|พรบ|รัฐธรรมนูญ|คดี/i, 'judge gavel on thick law books'],
+  [/สภา|ส\.ส|สส\.|ประชุม|อภิปราย|ลงมติ|ครม|มติ/i, 'microphones on parliament desks with name plates'],
+  [/ถนน|สะพาน|ก่อสร้าง|ทางด่วน|โครงการ/i, 'road and bridge construction site with cranes'],
+  [/รถไฟ|รถไฟฟ้า|bts|mrt|ขนส่ง/i, 'modern train on elevated railway'],
+  [/น้ำท่วม|ภัยแล้ง|เขื่อน|น้ำ/i, 'flooded street and water gauge'],
+  [/ฝุ่น|pm ?2\.5|มลพิษ|อากาศ/i, 'smoggy hazy city skyline'],
+  [/ไฟฟ้า|ค่าไฟ|พลังงาน|โซลาร์|น้ำมัน|ค่าน้ำมัน/i, 'electricity pylons and power meter'],
+  [/โรงเรียน|การศึกษา|นักเรียน|ครู|มหาวิทยาลัย/i, 'empty classroom desks with textbooks'],
+  [/โรงพยาบาล|สาธารณสุข|หมอ|แพทย์|ยา|วัคซีน|บัตรทอง/i, 'hospital corridor with medical equipment'],
+  [/ทหาร|กลาโหม|กองทัพ|อาวุธ|เรือดำน้ำ|เครื่องบินรบ/i, 'military equipment silhouette, no soldiers'],
+  [/ตำรวจ|อาชญากรรม|จับกุม/i, 'police car with flashing lights at night'],
+  [/ข้าว|เกษตร|ชาวนา|ชาวไร่|ยาง|ทุเรียน/i, 'green Thai rice paddy fields'],
+  [/ท่องเที่ยว|นักท่องเที่ยว|สนามบิน/i, 'airport terminal departure board'],
+  [/ดิจิทัล|แอป|แอพ|ออนไลน์|อินเทอร์เน็ต|ไซเบอร์|ข้อมูล/i, 'smartphone with app interface and data network lines'],
+  [/บ้าน|ที่อยู่อาศัย|คอนโด|ที่ดิน/i, 'housing model and land title documents'],
+  [/ค่าแรง|แรงงาน|ว่างงาน|เงินเดือน/i, 'factory floor and pay slips'],
+  [/หนี้|กู้|ดอกเบี้ย|ธนาคาร/i, 'loan contract and piggy bank'],
+];
+
+function keywordScene(text) {
+  const hits = [];
+  for (const [re, en] of SCENE_KEYWORDS) {
+    if (re.test(text)) hits.push(en);
+    if (hits.length >= 3) break;
+  }
+  return hits.join(', ');
+}
+
+// เก็บเฉพาะ ASCII (ภาษาไทยใน URL ทำให้ Pollinations ล้ม) + ตัดความยาว
+function cleanScene(t) {
+  return (t || '').replace(/[\u2010-\u2015\u2212]/g, '-').replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\r\n"`*]+/g, ' ').replace(/[^\x20-\x7E]/g, '')
+    .replace(/^(prompt|image prompt)\s*:\s*/i, '').replace(/\s+/g, ' ').trim().slice(0, 260);
+}
+
+const sceneCache = new Map();   // text → English scene (AI)
+let sceneInFlight = null;       // { text, promise }
+let sceneTimer = null;
+let sceneNextAllowed = 0;       // เวลาที่ยิงครั้งถัดไปได้ (ms)
+
+async function fetchAIScene(text) {
+  const ask = 'Turn this Thai social media news card text into ONE short English image prompt (max 30 words) ' +
+    'describing concrete symbolic objects and a setting that match the topic. No people, no faces, no words, no text, no logos. ' +
+    'Reply with the prompt only. Text: ' + text.replace(/\s+/g, ' ').slice(0, 300);
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    const r = await fetch('https://text.pollinations.ai/' + encodeURIComponent(ask) + '?seed=' + Math.floor(Math.random()*9999), { signal: ctrl.signal });
+    const body = await r.text();
+    if (!r.ok) {
+      let wait = Number(r.headers.get('retry-after')) || 0;
+      const m = body.match(/Retry after (\d+)s/i); if (m) wait = Math.max(wait, Number(m[1]));
+      sceneNextAllowed = Date.now() + ((wait || 45) + 2) * 1000;
+      throw new Error('busy');
+    }
+    sceneNextAllowed = Date.now() + 46000;
+    const scene = cleanScene(body);
+    if (scene.length < 10 || /^\s*[{<]/.test(body)) throw new Error('bad');
+    return scene;
+  } finally { clearTimeout(to); }
+}
+
+function setSceneHint(text) {
+  const el = document.getElementById('sceneHint');
+  if (!el) return;
+  if (!text) { el.textContent = ''; return; }
+  if (sceneCache.has(text)) { el.style.color = '#3daa6e'; el.textContent = '🧠 ฉาก BG (AI): ' + sceneCache.get(text); return; }
+  const kw = keywordScene(text);
+  if (sceneInFlight && sceneInFlight.text === text) { el.style.color = '#e85d04'; el.textContent = '🧠 กำลังวิเคราะห์ข้อความเพื่อทำ BG…'; return; }
+  el.style.color = '#777';
+  el.textContent = kw ? '🔑 ฉาก BG (คำค้น): ' + kw : '';
+}
+
+function requestScene(text) {
+  if (!text || sceneCache.has(text)) return Promise.resolve(sceneCache.get(text));
+  if (sceneInFlight && sceneInFlight.text === text) return sceneInFlight.promise;
+  if (sceneInFlight) return sceneInFlight.promise.then(() => requestScene(text)); // ทีละครั้ง
+  const wait = Math.max(0, sceneNextAllowed - Date.now());
+  const promise = (async () => {
+    if (wait) await sleep(wait);
+    // ข้อความเปลี่ยนไปแล้วระหว่างรอ → ไม่ต้องยิง
+    if (document.getElementById('textInput').value.trim() !== text) return undefined;
+    try { const sc = await fetchAIScene(text); sceneCache.set(text, sc); return sc; }
+    catch (e) { return undefined; }
+  })();
+  sceneInFlight = { text, promise };
+  setSceneHint(text);
+  promise.finally(() => {
+    if (sceneInFlight && sceneInFlight.promise === promise) sceneInFlight = null;
+    const cur = document.getElementById('textInput').value.trim();
+    setSceneHint(cur);
+  });
+  return promise;
+}
+
+// เรียกตอนพิมพ์ — รอหยุดพิมพ์ 1.5s แล้วค่อยส่งไปวิเคราะห์
+function onCardTextInput() {
+  const text = document.getElementById('textInput').value.trim();
+  setSceneHint(text);
+  clearTimeout(sceneTimer);
+  if (text.length < 6) return;
+  sceneTimer = setTimeout(() => requestScene(text), 1500);
+}
+
+// ใช้ตอนกด Gen: AI ถ้าพร้อม (รอได้ไม่เกิน maxWait) ไม่งั้นใช้คำค้น
+async function getSceneForText(text, maxWait = 25000) {
+  if (sceneCache.has(text)) return { scene: sceneCache.get(text), source: 'AI' };
+  const p = requestScene(text);
+  const ai = await Promise.race([p, sleep(maxWait).then(() => undefined)]);
+  if (ai) return { scene: ai, source: 'AI' };
+  return { scene: keywordScene(text), source: 'คำค้น' };
+}
 
 // เลือก BG_STYLE index ที่ตรงกับเนื้อหามากที่สุด
 function pickBGStyleIdx(text) {
@@ -562,6 +694,7 @@ const HALL_GOV_STYLE = [
 const BG_STYLES = [
   {
     label: 'Illustration',
+    setting: 'clean detailed editorial illustration style, objects arranged on a dark desk with government report books and a red rubber stamp, soft warm office light',
     type: 'illustration',
     prompt() {
       return 'flat lay illustration, neatly folded light khaki brown Thai civil servant bureaucrat uniform shirt on dark surface, small gold name badge and plain brass buttons, surrounded by stacked thick government report books and document folders, rubber stamp red ink pad, desk calendar, blurred background of more stacked books, soft warm office light, clean detailed illustration style, no military insignia no shoulder epaulette no medals';
@@ -569,6 +702,7 @@ const BG_STYLES = [
   },
   {
     label: 'Close-up Photo',
+    setting: 'close-up shallow depth of field editorial photo, subject in sharp focus, blurred stacks of government documents behind, soft warm light',
     type: 'photo',
     prompt() {
       return 'close-up shallow depth of field photo, light khaki brown Thai civil servant bureaucrat shirt collar and plain brass buttons in sharp focus, background blurred stack of thick government report books and official document folders, soft warm natural office light, no military rank no epaulette no medals, editorial documentary photography style';
@@ -576,6 +710,7 @@ const BG_STYLES = [
   },
   {
     label: 'ห้องประชุมรัฐ',
+    setting: 'placed inside an empty Thai parliament chamber with curved rows of warm brown wood seats and a radial sunburst ceiling dome',
     type: 'hall',
     prompt() {
       return 'empty Thai national assembly chamber, overhead wide angle view of curved semicircular rows of vacant warm honey brown wood seats with individual small name desks, large distinctive circular radial sunburst ceiling dome with pointed wedge panels, cream off-white walls, warm soft overhead institutional lighting, blue patterned carpet floor, official government building interior, no person no human';
@@ -583,6 +718,7 @@ const BG_STYLES = [
   },
   {
     label: 'ห้องโถงราชการ',
+    setting: 'placed in an empty grand government ministry hall with polished dark marble floor and amber light beams',
     type: 'hall',
     prompt() {
       return 'empty grand government ministry ceremonial entrance hall interior, ornate gold ceiling, polished dark marble floor with warm light reflection, symmetrical formal architecture, amber volumetric light beams from above, deep shadow on sides';
@@ -590,6 +726,7 @@ const BG_STYLES = [
   },
   {
     label: 'เวทีแถลงข่าว',
+    setting: 'placed in an empty government press briefing room with rows of tan chairs and a light wood podium',
     type: 'hall',
     prompt() {
       return 'empty Thai government official press briefing room, rows of vacant tan wood chairs neatly arranged facing front speaker area, cream off-white walls with formal rectangular panels, warm soft white overhead fluorescent institutional lighting, light brown wood podium at front, official government interior, clean formal atmosphere, no person no human no microphone stand';
@@ -597,6 +734,7 @@ const BG_STYLES = [
   },
   {
     label: 'ห้องทำงานกลางคืน',
+    setting: 'on a polished mahogany desk in a dark government office at night, single warm desk lamp, blurred city lights through window',
     type: 'hall',
     prompt() {
       return 'dark government executive office interior at night, single desk lamp casting warm amber pool of light on empty polished mahogany desk, blurred city lights bokeh visible through large window, dark bookshelves along wall, prestigious cinematic atmosphere, no person no human';
@@ -604,6 +742,7 @@ const BG_STYLES = [
   },
   {
     label: 'ห้องเก็บเอกสาร',
+    setting: 'in a dark government document archive with long rows of shelves of binders, dramatic side lighting',
     type: 'hall',
     prompt() {
       return 'dramatic dark government document archive room, long rows of metal shelving tightly packed with thick official document binders, dramatic side lighting casting sharp shadows between shelf rows, deep perspective, institutional authoritative atmosphere, no person no human';
@@ -611,6 +750,7 @@ const BG_STYLES = [
   },
   {
     label: 'ทางเดินราชการ',
+    setting: 'in an empty formal ministry marble hallway at night with gold accent lighting and reflective floor',
     type: 'hall',
     prompt() {
       return 'empty formal Thai government ministry marble hallway at night, polished reflective floor with overhead warm light reflections, dark paneled walls with framed official documents, receding perspective depth, gold accent lighting, prestigious institutional atmosphere, no person no human';
@@ -628,7 +768,6 @@ function saveHFToken() {
 
 // Pollinations ฟรีจำกัด 1 รูป / 45 วิ / IP — ถ้าโดน limit จะตอบ 402/429/503 เป็น JSON
 // ต้องเช็ก status เอง ไม่งั้นจะได้รูป "Free limit reached" มาเป็น BG
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function waitWithStatus(sec, label) {
   for (let s = sec; s > 0; s--) {
@@ -712,11 +851,16 @@ async function genOneBG() {
     grid.appendChild(slot);
   });
 
-  setGenStatus('กำลังสร้างรูป…', '#e85d04');
+  let elapsed = 0;
+  const timer = setInterval(() => { elapsed++; btn.innerHTML = `⏳ ${elapsed}s`; }, 1000);
+
+  setGenStatus('🧠 กำลังอ่านข้อความเพื่อหาฉากที่เกี่ยวข้อง…', '#e85d04');
+  const { scene, source } = await getSceneForText(text);
+  setSceneHint(text);
 
   const buildPrompt = (i) => {
     const s = BG_STYLES[i % BG_STYLES.length];
-    const sceneStyle = s.prompt(text);
+    const sceneStyle = scene ? `${scene}, ${s.setting}` : s.prompt(text);
     const govStyle = s.type === 'hall' ? HALL_GOV_STYLE : GOV_STYLE;
     const neg = s.type === 'hall'
       ? 'no person no human no figure no silhouette no face no animal no bird no insect no plant no text no words'
@@ -724,8 +868,6 @@ async function genOneBG() {
     return `${sceneStyle}, ${govStyle}, ${neg}`;
   };
 
-  let elapsed = 0;
-  const timer = setInterval(() => { elapsed++; btn.innerHTML = `⏳ ${elapsed}s`; }, 1000);
   let firstApplied = false;
 
   const fillSlot = (slotIdx, styleIdx, img) => {
@@ -760,7 +902,7 @@ async function genOneBG() {
   // Sequential — รูปที่ 2 จะรอคิว Pollinations เองถ้าโดน limit
   let lastErr = '';
   try {
-    setGenStatus('กำลังสร้างรูปที่ 1…', '#e85d04');
+    setGenStatus(scene ? `กำลังสร้างรูปที่ 1 (ฉากจาก${source})…` : 'กำลังสร้างรูปที่ 1…', '#e85d04');
     fillSlot(0, idx1, await genSingleImg(buildPrompt(idx1), isLocal, 'รูปที่ 1'));
     setGenStatus('รูป 1 สำเร็จ — กำลังสร้างรูปที่ 2…', '#e85d04');
   } catch(e) {
